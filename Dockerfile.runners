@@ -1,9 +1,0 @@
-FROM n8nio/runners:stable
-USER root
-
-# Just the packages we need
-RUN cd /opt/runners/task-runner-javascript && pnpm add pdf-parse
-RUN cd /opt/runners/task-runner-python && uv pip install pymupdf
-
-COPY n8n-task-runners.json /etc/n8n-task-runners.json
-USER runner
