@@ -15,7 +15,12 @@ async def run_tesseract(image_path, lang="eng"):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         if proc.returncode != 0:
             raise RuntimeError(stderr.decode())
         return stdout.decode().strip()
@@ -41,9 +46,14 @@ async def handle_ocr(request):
     tmp_path = tmp.name
     tmp.close()
 
+    task = asyncio.current_task()
+    request.protocol.on_connection_lost(lambda _exc: task.cancel())
+
     try:
         text = await run_tesseract(tmp_path, lang)
         return web.json_response({"text": text})
+    except asyncio.CancelledError:
+        return web.Response(status=499)
     except RuntimeError as e:
         return web.json_response({"error": str(e)}, status=500)
     finally:
@@ -73,6 +83,9 @@ async def handle_ocr_pdf(request):
     pdf_path = tmp.name
     tmp.close()
 
+    task = asyncio.current_task()
+    request.protocol.on_connection_lost(lambda _exc: task.cancel())
+
     page_images = []
     try:
         doc = fitz.open(pdf_path)
@@ -86,8 +99,14 @@ async def handle_ocr_pdf(request):
 
         doc.close()
 
-        tasks = [run_tesseract(img, lang) for img in page_images]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [asyncio.ensure_future(run_tesseract(img, lang)) for img in page_images]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         pages = []
         for i, result in enumerate(results):
@@ -97,6 +116,8 @@ async def handle_ocr_pdf(request):
                 pages.append({"page": i, "text": result})
 
         return web.json_response({"total_pages": total_pages, "pages": pages})
+    except asyncio.CancelledError:
+        return web.Response(status=499)
     finally:
         os.unlink(pdf_path)
         for img in page_images:

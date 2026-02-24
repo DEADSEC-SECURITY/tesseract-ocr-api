@@ -3,5 +3,7 @@ services:
     image: elgon2003/tesseract-ocr-api
     container_name: Tesseract-API
     restart: unless-stopped
+    environment:
+      - MAX_WORKERS=4
     ports:
       - "8884:8884"
