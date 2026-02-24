@@ -1,0 +1,22 @@
+services:
+  tesseract-api:
+    build:
+      context: ./tesseract-api
+      dockerfile: Dockerfile
+    container_name: Tesseract-API
+    restart: unless-stopped
+    networks:
+      - n8n-network
+
+  n8n-runners:
+    build:
+      context: .
+      dockerfile: Dockerfile.runners
+    container_name: n8n-runners
+    restart: unless-stopped
+    networks:
+      - n8n-network
+
+networks:
+  n8n-network:
+    external: true
