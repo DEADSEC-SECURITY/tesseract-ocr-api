@@ -1,36 +1,117 @@
-from flask import Flask, request, jsonify
-import subprocess
+from aiohttp import web
+import asyncio
 import tempfile
 import os
+import fitz
 
-app = Flask(__name__)
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", os.cpu_count() or 4))
+semaphore = asyncio.Semaphore(MAX_WORKERS)
 
-@app.route("/ocr", methods=["POST"])
-def ocr():
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
 
-    file = request.files["file"]
-    lang = request.form.get("lang", "eng")
+async def run_tesseract(image_path, lang="eng"):
+    async with semaphore:
+        proc = await asyncio.create_subprocess_exec(
+            "tesseract", image_path, "stdout", "-l", lang,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode())
+        return stdout.decode().strip()
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        file.save(tmp.name)
-        tmp_path = tmp.name
+
+async def handle_ocr(request):
+    reader = await request.multipart()
+
+    file_data = None
+    lang = "eng"
+
+    async for field in reader:
+        if field.name == "file":
+            file_data = await field.read()
+        elif field.name == "lang":
+            lang = (await field.read()).decode()
+
+    if file_data is None:
+        return web.json_response({"error": "No file provided"}, status=400)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp.write(file_data)
+    tmp_path = tmp.name
+    tmp.close()
 
     try:
-        result = subprocess.run(
-            ["tesseract", tmp_path, "stdout", "-l", lang],
-            capture_output=True, text=True, timeout=60
-        )
-        if result.returncode != 0:
-            return jsonify({"error": result.stderr}), 500
-        return jsonify({"text": result.stdout.strip()})
+        text = await run_tesseract(tmp_path, lang)
+        return web.json_response({"text": text})
+    except RuntimeError as e:
+        return web.json_response({"error": str(e)}, status=500)
     finally:
         os.unlink(tmp_path)
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
+
+async def handle_ocr_pdf(request):
+    reader = await request.multipart()
+
+    file_data = None
+    lang = "eng"
+    dpi = 150
+
+    async for field in reader:
+        if field.name == "file":
+            file_data = await field.read()
+        elif field.name == "lang":
+            lang = (await field.read()).decode()
+        elif field.name == "dpi":
+            dpi = int((await field.read()).decode())
+
+    if file_data is None:
+        return web.json_response({"error": "No file provided"}, status=400)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.write(file_data)
+    pdf_path = tmp.name
+    tmp.close()
+
+    page_images = []
+    try:
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+
+        for i in range(total_pages):
+            pix = doc[i].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+            img_path = tempfile.mktemp(suffix=".png")
+            pix.save(img_path)
+            page_images.append(img_path)
+
+        doc.close()
+
+        tasks = [run_tesseract(img, lang) for img in page_images]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        pages = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                pages.append({"page": i, "error": str(result)})
+            else:
+                pages.append({"page": i, "text": result})
+
+        return web.json_response({"total_pages": total_pages, "pages": pages})
+    finally:
+        os.unlink(pdf_path)
+        for img in page_images:
+            if os.path.exists(img):
+                os.unlink(img)
+
+
+async def handle_health(request):
+    return web.json_response({"status": "ok"})
+
+
+app = web.Application()
+app.router.add_post("/ocr", handle_ocr)
+app.router.add_post("/ocr/pdf", handle_ocr_pdf)
+app.router.add_get("/health", handle_health)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8884)
+    web.run_app(app, host="0.0.0.0", port=8884)
