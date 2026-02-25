@@ -7,22 +7,18 @@ import fitz
 
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", os.cpu_count() or 4))
 
-_ocr = None
+_reader = None
 
 
 def _init_worker():
-    global _ocr
-    from paddleocr import PaddleOCR
-    _ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
+    global _reader
+    import easyocr
+    _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
 
 
 def _ocr_image(image_path):
-    result = _ocr.ocr(image_path, cls=True)
-    lines = []
-    if result and result[0]:
-        for line in result[0]:
-            lines.append(line[1][0])
-    return "\n".join(lines)
+    result = _reader.readtext(image_path, detail=0)
+    return "\n".join(result)
 
 
 executor = ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=_init_worker)
