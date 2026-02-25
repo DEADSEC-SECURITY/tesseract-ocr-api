@@ -1,42 +1,46 @@
 from aiohttp import web
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import tempfile
 import os
 import fitz
 
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", os.cpu_count() or 4))
-semaphore = asyncio.Semaphore(MAX_WORKERS)
+
+_ocr = None
 
 
-async def run_tesseract(image_path, lang="eng"):
-    async with semaphore:
-        proc = await asyncio.create_subprocess_exec(
-            "tesseract", image_path, "stdout", "-l", lang,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await proc.communicate()
-        except asyncio.CancelledError:
-            proc.kill()
-            await proc.wait()
-            raise
-        if proc.returncode != 0:
-            raise RuntimeError(stderr.decode())
-        return stdout.decode().strip()
+def _init_worker():
+    global _ocr
+    from paddleocr import PaddleOCR
+    _ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
+
+
+def _ocr_image(image_path):
+    result = _ocr.ocr(image_path, cls=True)
+    lines = []
+    if result and result[0]:
+        for line in result[0]:
+            lines.append(line[1][0])
+    return "\n".join(lines)
+
+
+executor = ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=_init_worker)
+
+
+async def run_ocr(image_path):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, _ocr_image, image_path)
 
 
 async def handle_ocr(request):
     reader = await request.multipart()
 
     file_data = None
-    lang = "eng"
 
     async for field in reader:
         if field.name == "file":
             file_data = await field.read()
-        elif field.name == "lang":
-            lang = (await field.read()).decode()
 
     if file_data is None:
         return web.json_response({"error": "No file provided"}, status=400)
@@ -46,15 +50,10 @@ async def handle_ocr(request):
     tmp_path = tmp.name
     tmp.close()
 
-    task = asyncio.current_task()
-    request.protocol.on_connection_lost(lambda _exc: task.cancel())
-
     try:
-        text = await run_tesseract(tmp_path, lang)
+        text = await run_ocr(tmp_path)
         return web.json_response({"text": text})
-    except asyncio.CancelledError:
-        return web.Response(status=499)
-    except RuntimeError as e:
+    except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
     finally:
         os.unlink(tmp_path)
@@ -64,14 +63,11 @@ async def handle_ocr_pdf(request):
     reader = await request.multipart()
 
     file_data = None
-    lang = "eng"
     dpi = 150
 
     async for field in reader:
         if field.name == "file":
             file_data = await field.read()
-        elif field.name == "lang":
-            lang = (await field.read()).decode()
         elif field.name == "dpi":
             dpi = int((await field.read()).decode())
 
@@ -82,9 +78,6 @@ async def handle_ocr_pdf(request):
     tmp.write(file_data)
     pdf_path = tmp.name
     tmp.close()
-
-    task = asyncio.current_task()
-    request.protocol.on_connection_lost(lambda _exc: task.cancel())
 
     page_images = []
     try:
@@ -99,14 +92,8 @@ async def handle_ocr_pdf(request):
 
         doc.close()
 
-        tasks = [asyncio.ensure_future(run_tesseract(img, lang)) for img in page_images]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        tasks = [run_ocr(img) for img in page_images]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         pages = []
         for i, result in enumerate(results):
@@ -116,8 +103,6 @@ async def handle_ocr_pdf(request):
                 pages.append({"page": i, "text": result})
 
         return web.json_response({"total_pages": total_pages, "pages": pages})
-    except asyncio.CancelledError:
-        return web.Response(status=499)
     finally:
         os.unlink(pdf_path)
         for img in page_images:
