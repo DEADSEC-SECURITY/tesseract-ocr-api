@@ -13,11 +13,11 @@ _ocr = None
 def _init_worker():
     global _ocr
     from paddleocr import PaddleOCR
-    _ocr = PaddleOCR(use_angle_cls=True, lang="en", device="cpu")
+    _ocr = PaddleOCR(use_textline_orientation=True, lang="en", device="cpu")
 
 
 def _ocr_image(image_path):
-    result = _ocr.ocr(image_path, cls=True)
+    result = _ocr.ocr(image_path)
     lines = []
     if result and result[0]:
         for line in result[0]:
