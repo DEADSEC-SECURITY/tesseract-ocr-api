@@ -13,7 +13,7 @@ _ocr = None
 def _init_worker():
     global _ocr
     from paddleocr import PaddleOCR
-    _ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
+    _ocr = PaddleOCR(use_angle_cls=True, lang="en", device="cpu")
 
 
 def _ocr_image(image_path):
