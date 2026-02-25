@@ -5,8 +5,5 @@ services:
     restart: unless-stopped
     environment:
       - MAX_WORKERS=4
-      - FLAGS_enable_pir_in_executor=0
-      - FLAGS_enable_pir_api=0
-      - FLAGS_use_mkldnn=0
     ports:
       - "8884:8884"
